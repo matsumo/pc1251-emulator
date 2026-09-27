@@ -276,6 +276,7 @@ class App:
                 self.sound = None
         self.buzzer = Buzzer()
         self.pcm_wait = bytearray()  # まだチャンネルに渡していない音
+        self.overshoot = 0  # 前のフレームで進みすぎたサイクル
         self.turbo = 1
         self.dragging_switch = False
         self.mouse_key: str | None = None
@@ -836,10 +837,19 @@ class App:
         elif self.fast:
             self.fast = False
             self.say(f"{self.loading}を読み込みました")
-        for _ in range(speed * per_frame // (CLOCK // 200)):
+        # 1フレームでちょうどCLOCK/FPSサイクル進める。前のフレームで命令の途中まで
+        # はみ出した分は差し引く(音の標本の数が再生の速さとそろうように)
+        target = m.cpu.cycles + speed * per_frame - self.overshoot
+        self.overshoot = 0
+        while (left := target - m.cpu.cycles) > 0:
             if not self.boot_frames:
                 self.typer.step()
-            m.run(CLOCK // 200)
+            before = m.cpu.cycles
+            m.run(min(left, CLOCK // 200))
+            if m.cpu.cycles == before:  # 電源が切れていて時間が進まない
+                break
+        else:
+            self.overshoot = m.cpu.cycles - target
         if self.sound is not None and speed == 1:
             self.feed_sound(self.buzzer.render(m.sound_events, c0, m.cpu.cycles))
         elif self.sound is not None:
@@ -868,6 +878,7 @@ class App:
             self.draw_popup(out)
         pygame.display.flip()
 
+    PREBUFFER = RATE // FPS * 2 * 2  # 2フレームぶん(16ビット)
     MAX_PENDING = RATE // 4 * 2  # 0.25秒ぶん(16ビット)。これより遅れたら古い音を捨てる
 
     def feed_sound(self, pcm: bytes) -> None:
@@ -886,6 +897,10 @@ class App:
         if not self.pcm_wait:
             return
         if not sound.get_busy():
+            # 鳴り始めは2フレームぶんためてから渡す。フレームの時刻が少し揺れても
+            # 次の分が間に合い、途中で音が途切れない
+            if pcm and len(self.pcm_wait) < self.PREBUFFER:
+                return  # 音が切れたとき(pcmが空)は、たまった残りをすぐ渡す
             sound.play(pygame.mixer.Sound(buffer=bytes(self.pcm_wait)))
             self.pcm_wait.clear()
         elif sound.get_queue() is None:

@@ -252,9 +252,11 @@ def _play_breakout(level: str, height: int) -> None:
     for _ in range(30 * 8):  # パドルを玉の段に合わせ続ける
         app.frame()
         bx, wall = r[0x10], r[0x16]
-        # パドルと壁のあいだに見えるのは玉の1点だけ
-        dots = sum(bin(column(x)).count("1") for x in range(2, wall - 1))
-        assert dots <= 1, [column(x) for x in range(2, wall - 1)]
+        # パドルと壁のあいだに見えるのは玉の1点だけ。ただし画面を書き直している途中で
+        # フレームが切れると、前の位置と新しい位置の2点がすぐ近くに見えることがある
+        lit = [x for x in range(2, wall - 1) for _ in range(bin(column(x)).count("1"))]
+        dots = len(lit)
+        assert dots <= 1 or (dots == 2 and lit[1] - lit[0] <= 3), lit
         seen_ball = seen_ball or dots == 1
         if first_hit is None and r[0x1C] < left0:
             first_hit = bx  # 最初にブロックが壊れたときの玉の位置は、壁の手前か中
@@ -292,6 +294,20 @@ def test_grid_disappears_when_power_is_off():
         app.frame()
     assert not app.m.power and app.panel.grid_level == 0.0
     app.close()
+
+
+def test_sound_has_no_gaps_between_frames():
+    """1フレーム(CLOCK/30サイクル)ずつ音を作っても、1秒でちょうどRATE個の標本になる"""
+    from pc1251emu.audio import RATE, Buzzer
+    from pc1251emu.machine import CLOCK
+
+    b = Buzzer()
+    per = CLOCK // 30
+    events = [(t, 5 if (t // 48) % 2 else 4) for t in range(0, CLOCK, 48)]  # 2kHz
+    n = 0
+    for c in range(0, CLOCK, per):
+        n += len(b.render([e for e in events if c <= e[0] < c + per], c, c + per)) // 2
+    assert abs(n - RATE) <= 1
 
 
 def test_export_basic_round_trip(tmp_path=None):
@@ -396,6 +412,7 @@ if __name__ == "__main__":
     test_display_stays_on_while_computing()
     test_breakout_in_machine_code()
     test_grid_disappears_when_power_is_off()
+    test_sound_has_no_gaps_between_frames()
     test_export_basic_round_trip()
     test_fast_typing_is_not_dropped()
     print("ok")
