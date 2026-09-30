@@ -9,5 +9,6 @@ doc/*.aux
 doc/*.log
 doc/*.out
 doc/*.toc
+build/
 dist/
 *.egg-info/

@@ -21,6 +21,16 @@ mkdir rom                            # put the ROM read from your own machine he
 uv run pc1251                        # start
 ```
 
+### Building a Linux standalone binary
+
+You can build a single executable with PyInstaller.
+
+```sh
+uv run pyinstaller pc1251.spec
+```
+
+This produces `dist/pc1251`. You still need the ROM files (`rom/` or the `PC1251_ROM` environment variable); no Python environment is required to run it. The console window is hidden at runtime.
+
 ### Preparing the ROM
 
 The ROM is Sharp's copyrighted work, so it is not in this repository. Read it out of your own PC-1251 and put it in `rom/` under these names.
