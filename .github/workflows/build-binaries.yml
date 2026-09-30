@@ -1,0 +1,42 @@
+name: build-binaries
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+            binary: dist/pc1251.exe
+          - os: macos-14
+            name: macos-arm64
+            binary: dist/pc1251
+          - os: ubuntu-latest
+            name: linux-amd64
+            binary: dist/pc1251
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Build executable with PyInstaller
+        run: uv run pyinstaller pc1251.spec --noconfirm
+
+      - name: Ensure executable bit
+        if: runner.os != 'Windows'
+        run: chmod +x ${{ matrix.binary }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pc1251-${{ matrix.name }}
+          path: ${{ matrix.binary }}
