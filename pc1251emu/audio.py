@@ -21,6 +21,10 @@ RATE = 44100  # 22050Hzでは方形波の高調波の折り返しが耳につく
 AMP = 9000
 # 圧電素子は低音を返さない。50Hzあたりから下を切る一次のハイパス
 HPF = 1.0 - 2 * math.pi * 50 / RATE
+# 1.5kHzより上を約6dB下げる一次のシェルフ。方形波のままだと、実機の録音より
+# 倍音が強く軽い音になる。600Hzの2次ローパスまで削るとこもるので、この程度にした
+SHELF_A = math.exp(-2 * math.pi * 1500 / RATE)
+SHELF_G = 0.5
 SPC = CLOCK / RATE  # 1サンプルあたりのCPUサイクル(約4.4)
 OSC_HALF = {2: CLOCK / 2000 / 2, 3: CLOCK / 4000 / 2}  # 内蔵発振の半周期(サイクル)
 
@@ -32,6 +36,7 @@ class Buzzer:
         self.pending: list[tuple[int, int]] = []  # 標本にまだ入れていない書き込み
         self.x_prev = 0.0
         self.y = 0.0
+        self.lp = 0.0  # シェルフの低域側
 
     @staticmethod
     def _mean(mode: int, t0: float, t1: float) -> float:
@@ -68,7 +73,7 @@ class Buzzer:
         idx = 0
         mode = self.mode
         silent = True
-        x_prev, y = self.x_prev, self.y
+        x_prev, y, lp = self.x_prev, self.y, self.lp
         t0 = self.t
         for i in range(n):
             t1 = self.t + (i + 1) * SPC
@@ -88,12 +93,14 @@ class Buzzer:
                 x = self._mean(mode, t0, t1)
             y = HPF * (y + x - x_prev)
             x_prev = x
-            if abs(y) > 1e-3:
+            lp = SHELF_A * lp + (1 - SHELF_A) * y
+            z = lp + SHELF_G * (y - lp)
+            if abs(z) > 1e-3:
                 silent = False
-            out[i] = int(max(-1.0, min(1.0, y)) * AMP)
+            out[i] = int(max(-1.0, min(1.0, z)) * AMP)
             t0 = t1
         self.t = t0
         self.pending = ev[idx:]
         self.mode = mode
-        self.x_prev, self.y = x_prev, y
+        self.x_prev, self.y, self.lp = x_prev, y, lp
         return b"" if silent else out.tobytes()

@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import time
+from array import array
 from types import SimpleNamespace
 
 import pygame
@@ -248,7 +249,11 @@ class Typer:
 
 class App:
     def __init__(self, args):
-        pygame.mixer.pre_init(RATE, -16, 1, 512)
+        # allowedchanges=0: 装置の都合で2チャンネルや別の周波数で開かれると、こちらが
+        # 渡すモノラル44.1kHzの列がその形式として読まれる。2チャンネルなら2倍の速さで
+        # 鳴って1オクターブ高くなり、再生が生成に追いつかず音が途切れる。0にすると
+        # 変換はSDLが受け持ち、get_init()が頼んだとおりの形式を返す
+        pygame.mixer.pre_init(RATE, -16, 1, 512, allowedchanges=0)
         pygame.init()
         pygame.display.set_caption("SHARP PC-1251")
         self.scale = self._fit(args.scale)
@@ -270,10 +275,17 @@ class App:
         self.sound = None
         if not args.mute:
             try:
-                pygame.mixer.init(RATE, -16, 1, 512)
+                pygame.mixer.init(RATE, -16, 1, 512, allowedchanges=0)
                 self.sound = pygame.mixer.Channel(0)
             except pygame.error:
                 self.sound = None
+        self.sound_channels = 1
+        if self.sound is not None:
+            freq, _, channels = pygame.mixer.get_init()
+            if freq != RATE:
+                print(f"音を切ります: ミキサーが{freq}Hzで開かれました", file=sys.stderr)
+                self.sound = None
+            self.sound_channels = channels
         self.buzzer = Buzzer()
         self.pcm_wait = bytearray()  # まだチャンネルに渡していない音
         self.overshoot = 0  # 前のフレームで進みすぎたサイクル
@@ -891,15 +903,22 @@ class App:
         sound = self.sound
         if sound is None:
             return
+        if pcm and self.sound_channels > 1:  # 同じ標本を各チャンネルに並べる
+            mono = array("h", pcm)
+            multi = array("h", bytes(len(pcm) * self.sound_channels))
+            for ch in range(self.sound_channels):
+                multi[ch :: self.sound_channels] = mono
+            pcm = multi.tobytes()
         self.pcm_wait += pcm
-        if len(self.pcm_wait) > self.MAX_PENDING:
-            del self.pcm_wait[: len(self.pcm_wait) - self.MAX_PENDING]
+        limit = self.MAX_PENDING * self.sound_channels
+        if len(self.pcm_wait) > limit:
+            del self.pcm_wait[: len(self.pcm_wait) - limit]
         if not self.pcm_wait:
             return
         if not sound.get_busy():
             # 鳴り始めは2フレームぶんためてから渡す。フレームの時刻が少し揺れても
             # 次の分が間に合い、途中で音が途切れない
-            if pcm and len(self.pcm_wait) < self.PREBUFFER:
+            if pcm and len(self.pcm_wait) < self.PREBUFFER * self.sound_channels:
                 return  # 音が切れたとき(pcmが空)は、たまった残りをすぐ渡す
             sound.play(pygame.mixer.Sound(buffer=bytes(self.pcm_wait)))
             self.pcm_wait.clear()

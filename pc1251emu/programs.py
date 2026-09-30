@@ -28,11 +28,12 @@ EXTS = (".bas", ".hex")
 
 def library_dirs() -> list[str]:
     """一覧に使うディレクトリ。PC1251_PROGRAMS(:区切り)、~/.pc1251/programs、
-    このリポジトリのprograms/の順"""
+    このリポジトリのprograms/、programs/private/(公開しない手元用。あれば)の順"""
     dirs = [d for d in os.environ.get("PC1251_PROGRAMS", "").split(os.pathsep) if d]
     dirs.append(os.path.expanduser("~/.pc1251/programs"))
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     dirs.append(os.path.join(here, "programs"))
+    dirs.append(os.path.join(here, "programs", "private"))
     out = []
     for d in dirs:
         d = os.path.abspath(d)
