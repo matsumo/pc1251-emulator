@@ -1,7 +1,7 @@
-"""実ROMで電卓・BASIC・PC-インタープリタを動かす
+"""ROMで電卓・BASIC・PC-インタープリタを動かす
 
 ROM(rom/cpu-1251.rom, rom/bas-1251.rom)が必要。PC-インタープリタの試験には
-記事のダンプ(PC1251_PCINT_DUMP、既定はprograms/pcint.hex)を使う。
+programs/pcint.hexを使う(環境変数PC1251_PCINT_DUMPで別のファイルにできる)。
 """
 
 import os
@@ -63,6 +63,46 @@ def _enter_program(text):
     m.run(CLOCK // 5)
     typ(m, t, text)
     return m, t
+
+
+def test_long_line():
+    """79字を超える行は、途中まで打ってから▶で行末へ行き、続きを足す"""
+    from pc1251emu.basictext import program_text
+
+    line = "20 " + ": ".join(f"PRINT A{i}" for i in range(9))  # 空白込みで100字
+    assert len(line) > 79
+    m, t = boot()
+    m.mode = "PRO"
+    m.run(CLOCK // 5)
+    typ(m, t, "10 PRINT 1\n")
+    t.add_program(line + "\n30 END\n")
+    while t.busy:
+        t.step()
+        m.run(CLOCK // 200)
+    m.run(CLOCK // 2)
+    lines = program_text(m.mem).splitlines()
+    assert lines[1].replace(" ", "") == line.replace(" ", "")
+    assert lines[2] == "30 END"
+
+
+def test_after_dump_written_after_run():
+    """# after: のダンプは、実行の文字列を打ったあとに書く(DIMで消されない)"""
+    from pc1251emu.programs import Program
+
+    m, t = boot()
+    m.mode = "PRO"
+    m.run(CLOCK // 5)
+    typ(m, t, "NEW\n10 CLEAR:DIM O$(153)*1:PRINT 1\n")
+    m.mode = "RUN"
+    m.run(CLOCK // 5)
+    prog = Program(name="x", run="RUN", after=[(0xC530, bytes([0x12, 0x34]))])
+    t.add_text(prog.run_command + "\n")
+    t.add_write(prog.after)
+    while t.busy:
+        t.step()
+        m.run(CLOCK // 200)
+    m.run(CLOCK // 2)
+    assert (m.mem[0xC530], m.mem[0xC531]) == (0x12, 0x34)
 
 
 def test_program_survives_power_off():

@@ -1,7 +1,7 @@
 [project]
 name = "pc1251-emu"
-version = "0.1.0"
-description = "SHARP PC-1251のエミュレータ(SC61860を命令単位で実行し、実物のROMを動かす)"
+version = "0.2.0"
+description = "SHARP PC-1251/PC-1245のエミュレータ(SC61860を命令単位で実行し、ROMを動かす)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -46,5 +46,5 @@ extend-immutable-calls = ["typer.Option", "typer.Argument"]
 
 [tool.pyrefly]
 search-path = [".", "tools", "tests"]
-# 画面シミュレータから写した描画コードはそのまま残す
-project-excludes = ["tools/body_art.py"]
+# 筐体の描画コード(型の注釈がない)は検査しない
+project-excludes = ["tools/body_art.py", "tools/art_1245.py"]

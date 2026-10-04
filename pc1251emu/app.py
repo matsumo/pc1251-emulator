@@ -1,29 +1,37 @@
-"""PC-1251エミュレータの画面とキー操作
+"""PC-1251/PC-1245エミュレータの画面とキー操作
 
 uv run pc1251                 # 起動
+uv run pc1251 --model 1245    # PC-1245として起動する
 uv run pc1251 --type prog.bas # 起動後にファイルの中身をキー入力する
 uv run pc1251 --load dump.txt # 16進ダンプをRAMへ書き込む
-uv run pc1251 hello --run     # 置き場所のhello.basを読み込んで実行する
+uv run pc1251 primes --run    # 置き場所のprimes.basを読み込んで実行する
 """
 
 import os
 import subprocess
 import sys
 import time
+import wave
 from array import array
 from types import SimpleNamespace
 
 import pygame
 import typer
 
-from . import basictext, display, programs
+from . import basictext, display, programs, tape
 from .audio import RATE, Buzzer
-from .keytype import keys_for
-from .machine import CLOCK, PC1251, RomNotFound
+from .keytype import keys_for, keys_for_program
+from .machine import CLOCK, MODELS, PC1251, RomNotFound
 
 FPS = 30
 STATE_DIR = os.path.expanduser("~/.pc1251")
 RAM_FILE = os.path.join(STATE_DIR, "ram.bin")
+
+
+def ram_file(model: str = "1251") -> str:
+    """終了時にRAMを保存するファイル。RAMの大きさが違うので機種ごとに分ける"""
+    return RAM_FILE if model == "1251" else os.path.join(STATE_DIR, f"ram-{model}.bin")
+
 
 # そのまま押しっぱなしで伝えるキー
 DIRECT = {
@@ -44,20 +52,30 @@ for _i in range(10):
     DIGITS[getattr(pygame, f"K_{_i}")] = str(_i)
     DIGITS[getattr(pygame, f"K_KP{_i}")] = str(_i)
 LETTERS = {getattr(pygame, f"K_{_c}"): _c.upper() for _c in "abcdefghijklmnopqrstuvwxyz"}
+# 矢印キーを数字キーの8・2・4・6として押すモード(テンキーのないパソコン用)
+NUMPAD_ARROWS = {pygame.K_UP: "8", pygame.K_DOWN: "2", pygame.K_LEFT: "4", pygame.K_RIGHT: "6"}
 # 記号はキーボードの配列によって位置が違うので、打たれた文字(TEXTINPUT)で受け、
 # PC-1251でのキー操作(必要ならSHIFT付き)に直して打つ。
 
 MAC = sys.platform == "darwin"
 CMD = "⌘" if MAC else "Ctrl+"  # 画面に出すショートカットの修飾キー
+SHIFT = "⇧" if MAC else "Shift+"
+
+
+def speed_label(speed: float) -> str:
+    return "×1/2" if speed == 0.5 else f"×{speed}"
+
 
 HELP = [
     "マウス: キーを押す(押しているあいだは押しっぱなし)、モードスイッチはクリックかドラッグ",
     f"右クリック: メニュー   {CMD}O: プログラムの一覧   {CMD}↑↓: スイッチ   {CMD}/: この表示",
     "英数字・Enter・矢印・Space: そのまま   Tab: SHIFT   Option(WindowsはAlt): DEF",
+    f"{CMD}K: 矢印キーを数字キーの8・2・4・6にする/戻す(テンキーの代わり。F7でも)",
     '記号(: " ( ) など)は打てばSHIFT付きで入る   Backspace: 1字消す   Delete: CL',
-    f"Esc: BRK/ON   {CMD}T: 速さ x1/x4   {CMD}R: RESET   {CMD}S: 画面保存   {CMD}V: 貼り付け",
+    f"Esc: BRK/ON   {CMD}R: RESET   {CMD}S: 画面保存   {CMD}V: 貼り付け",
+    f"{CMD}T: 速くする   {SHIFT}{CMD}T: 遅くする(1/2倍〜8倍。1倍以外では音の高さも変わる)",
     f"{CMD}E: いまのBASICのプログラムを.basのファイルに書き出す(プログラムの置き場所へ)",
-    "ファイルのドロップ: 読み込む   F1〜F4、F5、F6、F9、F10、F12も使える(手引きの表)",
+    "ファイルのドロップ: 読み込む   F1〜F7、F9、F10、F12も使える(手引きの表)",
 ]
 
 
@@ -66,8 +84,9 @@ def export_program(m, folder: str, prog: "programs.Program | None" = None) -> st
 
     最後に読み込んだプログラムがわかれば、その名前を使い、組になっていた
     16進ダンプを「# hex:」で指しておく(RAMのマシン語そのものは書き出さない)。
+    機種用のフォルダ(pc1245など)にあったものなら、folderの中の同じ名前のフォルダに書く。
     """
-    body = basictext.program_text(m.mem)
+    body = basictext.program_text(m.mem, start=m.model.prog_start)
     if not body:
         return None
     name = prog.name if prog else "program"
@@ -78,6 +97,8 @@ def export_program(m, folder: str, prog: "programs.Program | None" = None) -> st
         head += [f"# hex: {os.path.basename(p)}" for p in prog.paths if p.lower().endswith(".hex")]
         if prog.run:
             head.append(f"# run: {prog.run}")
+    if prog and programs.folder_model(prog.paths[0]):
+        folder = os.path.join(folder, programs.model_dir(programs.folder_model(prog.paths[0])))
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, f"{name}-{stamp}.bas")
     with open(path, "w", encoding="utf-8") as f:
@@ -140,6 +161,7 @@ class Typer:
         self.m = machine
         self.on_mode = on_mode  # "@MODE:PRO"のような印でスイッチを動かす
         self.queue: list[list[str]] = []
+        self.writes: dict[str, list[tuple[int, bytes]]] = {}
         self.cur: list[str] | None = None
         self.until = 0
         self.phase = 0
@@ -176,13 +198,25 @@ class Typer:
         return any(e[:1] != [self.LIVE] for e in self.queue)
 
     def add_text(self, text: str) -> None:
-        self.queue.extend(keys_for(text.replace("\r\n", "\n").replace("\r", "\n")))
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        self.queue.extend(keys_for(text, self.m.model.name))
+
+    def add_program(self, text: str) -> None:
+        """BASICの行を打つ。79字を超える行は分けて打つ(keytype.keys_for_program)"""
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        self.queue.extend(keys_for_program(text, self.m.model.name))
 
     def add_keys(self, keys: list[list[str]]) -> None:
         self.queue.extend(keys)
 
     def add_mode(self, mode: str) -> None:
         self.queue.append([f"@MODE:{mode}"])
+
+    def add_write(self, blocks: list[tuple[int, bytes]]) -> None:
+        """前の打鍵が終わったところで、ダンプをRAMに書き込む"""
+        key = f"@WRITE:{len(self.writes)}:{id(blocks)}"
+        self.writes[key] = blocks
+        self.queue.append([key])
 
     @property
     def busy(self) -> bool:
@@ -194,6 +228,14 @@ class Typer:
             if not self.queue:
                 return
             self.cur = self.queue.pop(0)
+            if self.cur and self.cur[0].startswith("@WRITE:"):
+                # 打ち込みの途中でRAMに書き込む(# after: のダンプ)
+                for addr, data in self.writes.pop(self.cur[0], []):
+                    for i, b in enumerate(data):
+                        self.m.write(addr + i, b)
+                self.until = c
+                self.phase = 1
+                return
             if self.cur and self.cur[0].startswith("@MODE:"):
                 self.live = False
                 mode = self.cur[0][6:]
@@ -249,23 +291,25 @@ class Typer:
 
 class App:
     def __init__(self, args):
-        # allowedchanges=0: 装置の都合で2チャンネルや別の周波数で開かれると、こちらが
-        # 渡すモノラル44.1kHzの列がその形式として読まれる。2チャンネルなら2倍の速さで
-        # 鳴って1オクターブ高くなり、再生が生成に追いつかず音が途切れる。0にすると
-        # 変換はSDLが受け持ち、get_init()が頼んだとおりの形式を返す
+        # allowedchanges=0: 頼んだ形式(モノラル44.1kHz)で開き、装置への変換はSDLにまかせる。
+        # 2チャンネルで開かれると、渡した列が2倍の速さで鳴る
         pygame.mixer.pre_init(RATE, -16, 1, 512, allowedchanges=0)
+        model = getattr(args, "model", "1251")
+        self.m = PC1251(model=model)  # ROMがなければここで止まる(窓を開く前に)
         pygame.init()
-        pygame.display.set_caption("SHARP PC-1251")
+        pygame.display.set_caption(f"SHARP {self.m.model.title}")
         self.scale = self._fit(args.scale)
         size = (int(display.OUT_W * self.scale), int(display.OUT_H * self.scale))
         self.window = pygame.display.set_mode(size)
-        self.panel = display.Panel()
+        self.panel = display.Panel(model)
         self.panel.set_fps(FPS, args.persist)
-        self.m = PC1251()
+        self.sw_stops = self.panel.switch_stops  # スイッチの段(上から)と、その中心のy
+        self.ram_file = ram_file(model)
         self.typer = Typer(self.m, self.set_mode)
         self.fast = False  # 読み込み中は時計に合わせず全速で動かす
         self.menu: dict | None = None  # F6の一覧
         self.status = ""  # 画面の下に出す知らせ
+        self.tape_out = tape.TapeOut()  # CSAVEの音を見張ってwavに書き出す
         self.status_until = 0.0
         self.loading = ""
         self.load_total = 1
@@ -289,21 +333,24 @@ class App:
         self.buzzer = Buzzer()
         self.pcm_wait = bytearray()  # まだチャンネルに渡していない音
         self.overshoot = 0  # 前のフレームで進みすぎたサイクル
-        self.turbo = 1
+        self.turbo: float = 1  # 速さの倍率(SPEEDSのどれか)
+        self.numpad_arrows = bool(getattr(args, "numpad", False))
         self.dragging_switch = False
         self.mouse_key: str | None = None
         self.help = FPS * 8
         self.font: pygame.font.Font | None = None
         self.save_ram = not args.fresh
-        if self.save_ram and self.m.load_ram(RAM_FILE):
+        if self.save_ram and self.m.load_ram(self.ram_file):
             self.m.cpu.reset()
         self.load = args.load
         self.boot_frames = FPS  # 起動してから貼り付けを始めるまで
         if args.type:
             self.typer.add_text(open(args.type, encoding="utf-8").read())
         self.pending: tuple[programs.Program, bool] | None = None
+        if getattr(args, "tape", None):
+            self.insert_tape(args.tape)
         if getattr(args, "program", None):
-            prog = programs.find(args.program)
+            prog = programs.find(args.program, self.m.model.name)
             if prog is None:
                 raise FileNotFoundError(f"{args.program}が見つかりません")
             self.pending = (prog, args.run)
@@ -329,7 +376,7 @@ class App:
         if self.popup is not None:
             self.popup_key(ev)
             return
-        if mods & (pygame.KMOD_META | pygame.KMOD_CTRL) and self.shortcut(ev.key):
+        if mods & (pygame.KMOD_META | pygame.KMOD_CTRL) and self.shortcut(ev.key, mods):
             return
         if ev.key == pygame.K_F6:
             self.open_menu()
@@ -339,13 +386,17 @@ class App:
             return
         fkeys = {pygame.K_F1: "RUN", pygame.K_F2: "PRO", pygame.K_F3: "RSV", pygame.K_F4: "OFF"}
         if ev.key in fkeys:
-            self.set_mode(fkeys[ev.key])
+            if fkeys[ev.key] in m.model.modes:  # PC-1245にはRSVがない
+                self.set_mode(fkeys[ev.key])
             return
         if ev.key == pygame.K_F5:
             m.reset_key = True
             return
         if ev.key == pygame.K_F9:
-            self.toggle_speed()
+            self.change_speed(-1 if mods & pygame.KMOD_SHIFT else 1)
+            return
+        if ev.key == pygame.K_F7:
+            self.toggle_arrows()
             return
         if ev.key == pygame.K_F12:
             self.screenshot()
@@ -358,11 +409,17 @@ class App:
             return
         if mods & (pygame.KMOD_META | pygame.KMOD_CTRL):
             return
-        name = DIRECT.get(ev.key) or LETTERS.get(ev.key)
+        name = self.key_name(ev.key)
         if name is None and not mods & pygame.KMOD_SHIFT:
             name = DIGITS.get(ev.key)  # Shift付きの数字キーは記号になる
         if name:
             self.typer.press_live(name)
+
+    def key_name(self, key: int) -> str | None:
+        """パソコンのキーをPC-1251のキーの名前にする(数字キーを除く)"""
+        if self.numpad_arrows and key in NUMPAD_ARROWS:
+            return NUMPAD_ARROWS[key]
+        return DIRECT.get(key) or LETTERS.get(key)
 
     def key_up(self, ev) -> None:
         m = self.m
@@ -370,9 +427,12 @@ class App:
             m.brk = False
         elif ev.key == pygame.K_F5:
             m.reset_key = False
-        name = DIRECT.get(ev.key) or LETTERS.get(ev.key) or DIGITS.get(ev.key)
+        name = self.key_name(ev.key) or DIGITS.get(ev.key)
         if name:
             self.typer.release_live(name)
+        if ev.key in NUMPAD_ARROWS:  # 押しているあいだにモードを切り替えたとき
+            self.typer.release_live(DIRECT[ev.key])
+            self.typer.release_live(NUMPAD_ARROWS[ev.key])
 
     def text_input(self, text: str) -> None:
         if self.menu is not None or self.popup is not None:
@@ -380,21 +440,22 @@ class App:
         for ch in text:
             if ch.isascii() and (ch.isalnum() or ch == " "):
                 continue  # KEYDOWNで押しっぱなしとして伝えた
-            self.typer.add_live_keys(keys_for(ch))
+            self.typer.add_live_keys(keys_for(ch, self.m.model.name))
 
     # ---- ショートカットと右クリックのメニュー ----
-    # Fキーは、Macでは明るさや音量に、Windowsでもほかのアプリに取られることがある。
-    # そこで⌘(Windows・LinuxはCtrl)との組み合わせと、右クリックのメニューでも同じことができる
-    # ようにした。Ctrl+↑↓はmacOSのMission Controlに取られるので、Macでは⌘を使う。
-    def shortcut(self, key: int) -> bool:
+    # Fキーは明るさや音量、ほかのアプリに取られることがあるので、同じ操作を
+    # ⌘(Windows・LinuxはCtrl)との組み合わせと右クリックのメニューにも置く。
+    # Ctrl+↑↓はmacOSのMission Controlが使うので、Macでは⌘。
+    def shortcut(self, key: int, mods: int = 0) -> bool:
         actions = {
             pygame.K_o: self.open_menu,
-            pygame.K_t: self.toggle_speed,
+            pygame.K_t: lambda: self.change_speed(-1 if mods & pygame.KMOD_SHIFT else 1),
             pygame.K_r: self.press_reset,
             pygame.K_s: self.screenshot,
             pygame.K_e: self.export_program,
             pygame.K_v: self.paste,
             pygame.K_SLASH: self.toggle_help,
+            pygame.K_k: self.toggle_arrows,
             pygame.K_UP: lambda: self.move_switch(-1),
             pygame.K_DOWN: lambda: self.move_switch(1),
         }
@@ -404,9 +465,20 @@ class App:
         act()
         return True
 
-    def toggle_speed(self) -> None:
-        self.turbo = 4 if self.turbo == 1 else 1
-        self.say("速さ ×4" if self.turbo == 4 else "速さ ×1", 1.5)
+    SPEEDS = (0.5, 1, 2, 4, 8)
+
+    def change_speed(self, step: int) -> None:
+        """速さを1段上げる(step=1)か下げる(step=-1)。両端ではそのまま"""
+        i = self.SPEEDS.index(self.turbo) + step
+        self.turbo = self.SPEEDS[min(max(i, 0), len(self.SPEEDS) - 1)]
+        self.say(f"速さ {speed_label(self.turbo)}", 1.5)
+
+    def toggle_arrows(self) -> None:
+        self.numpad_arrows = not self.numpad_arrows
+        if self.numpad_arrows:
+            self.say("矢印キー → 数字キーの8・2・4・6", 2.5)
+        else:
+            self.say("矢印キー → ↑↓◀▶", 2.5)
 
     def toggle_help(self) -> None:
         self.help = 0 if self.help else FPS * 10
@@ -417,34 +489,27 @@ class App:
         self.reset_frames = max(1, FPS * 3 // 10)
 
     def move_switch(self, step: int) -> None:
-        order = [name for name, _y in self.SW_STOPS]
+        order = [name for name, _y in self.sw_stops]
         i = order.index(self.m.mode) if self.m.mode in order else order.index("RUN")
         self.set_mode(order[min(max(i + step, 0), len(order) - 1)])
 
     def popup_items(self) -> list[tuple[str, str, object]]:
         """(表示, ショートカット, 動作)。動作がNoneなら区切り線"""
-        popup = self.popup
-        if popup is not None and popup.get("page") == "progs":
-            items: list[tuple[str, str, object]] = [("◀ 戻る", "", self.popup_main), ("", "", None)]
-            for prog in popup["progs"]:
-                items.append((prog.title, "", lambda pr=prog: self.open_program(pr, run=True)))
-            if not popup["progs"]:
-                items.append(("(プログラムがありません)", "", lambda: None))
-            return items
-        items = [
-            ("プログラムを読み込んで実行 ▶", "", self.popup_progs),
+        items: list[tuple[str, str, object]] = [
             ("プログラムの一覧…", f"{CMD}O", self.open_menu),
             ("", "", None),
         ]
-        for name, _y in self.SW_STOPS:
+        for name, _y in self.sw_stops:
             key = f"{CMD}↑↓" if self.m.mode == name else ""
             items.append((f"スイッチ {name}", key, lambda n=name: self.set_mode(n)))
         items += [
             ("", "", None),
+            (f"速くする(いま{speed_label(self.turbo)})", f"{CMD}T", lambda: self.change_speed(1)),
+            ("遅くする", f"{SHIFT}{CMD}T", lambda: self.change_speed(-1)),
             (
-                "速さを1倍に戻す" if self.turbo == 4 else "速さを4倍にする",
-                f"{CMD}T",
-                self.toggle_speed,
+                "矢印キーを↑↓◀▶に戻す" if self.numpad_arrows else "矢印キーを8・2・4・6にする",
+                f"{CMD}K",
+                self.toggle_arrows,
             ),
             ("RESETボタンを押す", f"{CMD}R", self.press_reset),
             ("プログラムをファイルに書き出す", f"{CMD}E", self.export_program),
@@ -455,23 +520,11 @@ class App:
         return items
 
     def open_popup(self, pos) -> None:
-        self.popup = {"pos": pos, "sel": -1, "rows": [], "page": "main"}
-
-    def popup_progs(self) -> None:
-        """メニューの中身をプログラムの一覧に入れ替える(置き場所はこのとき読み直す)"""
-        if self.popup is not None:
-            self.popup.update(page="progs", progs=programs.scan(), sel=-1)
-
-    def popup_main(self) -> None:
-        if self.popup is not None:
-            self.popup.update(page="main", sel=-1)
+        self.popup = {"pos": pos, "sel": -1, "rows": []}
 
     def popup_run(self, i: int) -> None:
         items = self.popup_items()
         act = items[i][2] if 0 <= i < len(items) else None
-        if act in (self.popup_progs, self.popup_main):
-            act()  # pyrefly: ignore[not-callable]
-            return
         self.popup = None
         if callable(act):
             act()
@@ -501,10 +554,8 @@ class App:
         return -1
 
     # ---- マウス ----
-    SW_X0, SW_X1 = 1255, 1373  # モードスイッチ(ラベルと溝)の横の範囲
-    SW_Y0, SW_Y1 = 62, 197
-    # スイッチの位置(ラベルの段の中心のy)。tools/body_art.pyのSW_BOXから決まる
-    SW_STOPS = (("RSV", 101), ("PRO", 127), ("RUN", 153), ("OFF", 182))
+    # モードスイッチ(ラベルと溝)の範囲と各段の位置は、絵のフォルダのlayout.jsonにある
+    # (display.Panel.switch_area、switch_stops)
 
     def mouse_down(self, pos) -> None:
         if self.menu is not None:
@@ -519,7 +570,8 @@ class App:
             return
         x = pos[0] / self.scale - display.MARGIN
         y = pos[1] / self.scale - display.MARGIN
-        if self.SW_X0 <= x <= self.SW_X1 and self.SW_Y0 <= y <= self.SW_Y1:
+        sx0, sy0, sx1, sy1 = self.panel.switch_area
+        if sx0 <= x <= sx1 and sy0 <= y <= sy1:
             self.dragging_switch = True
             self.set_switch_from(y)
             return
@@ -541,7 +593,7 @@ class App:
             self.m.held.discard(name)
 
     def set_switch_from(self, y: float) -> None:
-        mode = min(self.SW_STOPS, key=lambda s: abs(s[1] - y))[0]
+        mode = min(self.sw_stops, key=lambda s: abs(s[1] - y))[0]
         self.set_mode(mode)
 
     def set_mode(self, new: str) -> None:
@@ -556,9 +608,12 @@ class App:
     def open_program(self, prog: programs.Program, run: bool = False) -> None:
         """ダンプをRAMに書き、BASICはPROモードでNEWしてから打ち込む"""
         m = self.m
+        if not prog.runs_on(m.model.name):
+            self.say(f"{prog.label(m.model.name)}なので、{m.model.title}では読み込みません", 5)
+            return
         if prog.errors:
             self.say("読めない行があります: " + prog.errors[0], 6)
-        if not prog.blocks and not prog.basic:
+        if not prog.blocks and not prog.basic and not prog.after:
             self.say(f"{prog.name}: 中身がありません", 4)
             return
         if not m.power:
@@ -569,10 +624,16 @@ class App:
         back = m.mode if m.mode in ("RUN", "PRO") else "RUN"
         if prog.basic:
             self.typer.add_mode("PRO")
-            self.typer.add_text("NEW\n" + prog.basic)
+            self.typer.add_text("NEW\n")
+            self.typer.add_program(prog.basic)
         if run and prog.run_command:
             self.typer.add_mode("RUN")
             self.typer.add_text(prog.run_command + "\n")
+            if prog.after:
+                self.typer.add_write(prog.after)
+        elif prog.after:
+            # 実行しないときは、そのまま書いておく(RUNで消えることがある)
+            self.typer.add_write(prog.after)
         elif prog.basic:
             self.typer.add_mode(back)
         if prog.basic:
@@ -583,7 +644,21 @@ class App:
         if not self.fast:
             self.say(f"{prog.title}を読み込みました({prog.size}バイト)")
 
+    def insert_tape(self, path: str) -> None:
+        """wavのテープをセットする。ROMがCLOADでカセットの入力を読み始めたときに再生が始まる"""
+        try:
+            self.m.tape = tape.TapeIn(path)
+        except (OSError, EOFError, wave.Error) as e:
+            self.say(f"{os.path.basename(path)}を読めません({e})", 5)
+            return
+        self.say(
+            f"テープ {os.path.basename(path)} をセットしました。CLOADかCLOAD Mで読み込みます", 6
+        )
+
     def open_file(self, path: str) -> None:
+        if path.lower().endswith(".wav"):
+            self.insert_tape(path)
+            return
         if os.path.splitext(path)[1].lower() in programs.EXTS:
             self.open_program(programs.load_program(path))
             return
@@ -597,7 +672,9 @@ class App:
         self.status_until = time.monotonic() + seconds
 
     def open_menu(self) -> None:
-        self.menu = {"items": programs.scan(), "sel": 0, "top": 0}
+        """プログラムの一覧を開く。選ぶと読み込んで実行する(Shift+Enterは読み込むだけ)"""
+        items = programs.for_model(programs.scan(), self.m.model.name)
+        self.menu = {"items": items, "sel": 0, "top": 0}
 
     MENU_ROWS = 12
 
@@ -611,9 +688,13 @@ class App:
             menu["sel"] = (menu["sel"] - 1) % len(items)
         elif ev.key == pygame.K_DOWN and items:
             menu["sel"] = (menu["sel"] + 1) % len(items)
+        elif ev.key in (pygame.K_PAGEUP, pygame.K_PAGEDOWN) and items:
+            step = self.MENU_ROWS if ev.key == pygame.K_PAGEDOWN else -self.MENU_ROWS
+            menu["sel"] = min(max(menu["sel"] + step, 0), len(items) - 1)
         elif ev.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and items:
             self.menu = None
-            self.open_program(items[menu["sel"]], run=bool(ev.mod & pygame.KMOD_SHIFT))
+            run = not ev.mod & pygame.KMOD_SHIFT
+            self.open_program(items[menu["sel"]], run=run)
         elif ev.key == pygame.K_o:
             self.reveal(programs.user_dir())
         elif ev.key == pygame.K_r:
@@ -623,15 +704,25 @@ class App:
             top = self.menu["top"]
             self.menu["top"] = min(max(top, sel - self.MENU_ROWS + 1), sel)
 
+    def menu_scroll(self, lines: int) -> None:
+        """一覧を行単位で動かす(ホイール)。選んでいる行は見えている範囲に入れる"""
+        menu = self.menu
+        assert menu is not None
+        rows = self.MENU_ROWS
+        last = max(0, len(menu["items"]) - rows)
+        menu["top"] = min(max(menu["top"] + lines, 0), last)
+        if menu["items"]:
+            menu["sel"] = min(max(menu["sel"], menu["top"]), menu["top"] + rows - 1)
+
     def menu_click(self, pos) -> None:
         menu = self.menu
         assert menu is not None
         rect = getattr(self, "_menu_rows", [])
         for i, r in rect:
             if r.collidepoint(pos):
-                if menu["sel"] == i:  # 選んであるものをもう一度押すと読み込む
+                if menu["sel"] == i:  # 選んであるものをもう一度押すと読み込んで実行する
                     self.menu = None
-                    self.open_program(menu["items"][i])
+                    self.open_program(menu["items"][i], run=True)
                 else:
                     menu["sel"] = i
                 return
@@ -678,6 +769,16 @@ class App:
             self.say("書き出すプログラムがありません")
         else:
             self.say(f"{_short(path)}に書き出しました", 5)
+
+    def save_tape(self, samples) -> None:
+        """CSAVEの音を、置き場所に「tape-日時.wav」として書き出す"""
+        try:
+            path = os.path.join(programs.user_dir(), f"tape-{time.strftime('%Y%m%d-%H%M%S')}.wav")
+            tape.write_wav(path, samples)
+        except OSError as e:
+            self.say(f"テープの音を書き出せません: {e}", 5)
+            return
+        self.say(f"テープの音を{_short(path)}に書き出しました", 6)
 
     def screenshot(self) -> None:
         os.makedirs(STATE_DIR, exist_ok=True)
@@ -771,20 +872,36 @@ class App:
                 f.render("まだ何もありません。.basか.hexを置いてください", True, grey),
                 (14, 8 + lh),
             )
-        for n, prog in enumerate(items[menu["top"] : menu["top"] + rows]):
-            i = menu["top"] + n
+        top = menu["top"]
+        above, below = top, max(0, len(items) - top - rows)
+        bar = 12 if above or below else 0  # 入りきらないときは右に位置のバーを出す
+        if above:
+            img = f.render(f"▲ 上にあと{above}本", True, white)
+            box.blit(img, (w - img.get_width() - 14 - bar, 8))
+        if below:
+            img = f.render(f"▼ 下にあと{below}本(↓かホイールで)", True, white)
+            box.blit(img, (w - img.get_width() - 14 - bar, 8 + lh * (rows + 1)))
+        if bar:
+            ty, th = 8 + lh, lh * rows - 2
+            pygame.draw.rect(box, (60, 62, 68), (w - 12, ty, 5, th), border_radius=2)
+            ky = ty + th * top // len(items)
+            kh = max(12, th * rows // len(items))
+            pygame.draw.rect(box, (150, 152, 158), (w - 12, ky, 5, kh), border_radius=2)
+        for n, prog in enumerate(items[top : top + rows]):
+            i = top + n
             y = 8 + lh * (n + 1)
             if i == menu["sel"]:
-                pygame.draw.rect(box, hi, (6, y - 2, w - 12, lh))
-            box.blit(f.render(prog.title, True, white), (14, y))
-            info = prog.kinds + (f" {prog.size}B" if prog.blocks else "")
+                pygame.draw.rect(box, hi, (6, y - 2, w - 12 - bar, lh))
+            ink = white if prog.runs_on(self.m.model.name) else grey
+            box.blit(f.render(prog.label(self.m.model.name), True, ink), (14, y))
+            info = prog.kinds + (f" {prog.size}B" if prog.size else "")
             if prog.errors:
                 info += " 読めない行あり"
             img = f.render(info, True, grey)
-            box.blit(img, (w - img.get_width() - 14, y))
-            self._menu_rows.append((i, pygame.Rect(x0 + 6, y0 + y - 2, w - 12, lh)))
+            box.blit(img, (w - img.get_width() - 14 - bar, y))
+            self._menu_rows.append((i, pygame.Rect(x0 + 6, y0 + y - 2, w - 12 - bar, lh)))
         foot = [
-            "↑↓: 選ぶ   Enter: 読み込む   Shift+Enter: 読み込んで実行   Esc: 閉じる",
+            "↑↓: 選ぶ   Enter: 読み込んで実行   Shift+Enter: 読み込むだけ   Esc: 閉じる",
             f"O: 置き場所を開く({_short(programs.user_dir())})   R: 一覧を読み直す",
         ]
         for k, line in enumerate(foot):
@@ -795,6 +912,11 @@ class App:
     def handle(self, ev) -> bool:
         if ev.type == pygame.QUIT:
             return False
+        if self.help and ev.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
+            # キーの説明は、何か押すか、クリックしたら消す。その操作はそのまま効く。
+            # 説明を出し入れするキー(⌘/、F10)は、その処理に任せる
+            if ev.type != pygame.KEYDOWN or ev.key not in (pygame.K_SLASH, pygame.K_F10):
+                self.help = 0
         if ev.type == pygame.KEYDOWN:
             self.key_down(ev)
         elif ev.type == pygame.KEYUP:
@@ -810,6 +932,8 @@ class App:
             self.mouse_down(ev.pos)
         elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
             self.mouse_up()
+        elif ev.type == pygame.MOUSEWHEEL and self.menu is not None:
+            self.menu_scroll(-ev.y)
         elif ev.type == pygame.MOUSEMOTION and self.popup is not None:
             self.popup["sel"] = self.popup_hit(ev.pos)
         elif ev.type == pygame.MOUSEMOTION and self.dragging_switch:
@@ -836,7 +960,8 @@ class App:
             self.reset_frames -= 1
             if self.reset_frames == 0:
                 m.reset_key = False
-        speed = self.turbo * (8 if self.typer.scripted and not self.boot_frames else 1)
+        typing = self.typer.scripted and not self.boot_frames
+        speed = self.turbo * (8 if typing else 1)
         c0 = m.cpu.cycles
         m.sound_events.clear()
         if self.fast and self.typer.busy and not self.boot_frames:
@@ -851,7 +976,7 @@ class App:
             self.say(f"{self.loading}を読み込みました")
         # 1フレームでちょうどCLOCK/FPSサイクル進める。前のフレームで命令の途中まで
         # はみ出した分は差し引く(音の標本の数が再生の速さとそろうように)
-        target = m.cpu.cycles + speed * per_frame - self.overshoot
+        target = m.cpu.cycles + int(speed * per_frame) - self.overshoot
         self.overshoot = 0
         while (left := target - m.cpu.cycles) > 0:
             if not self.boot_frames:
@@ -862,10 +987,18 @@ class App:
                 break
         else:
             self.overshoot = m.cpu.cycles - target
-        if self.sound is not None and speed == 1:
-            self.feed_sound(self.buzzer.render(m.sound_events, c0, m.cpu.cycles))
+        wav = self.tape_out.feed(m.sound_events, m.cpu.cycles, m.pc_out >> 4)
+        if wav is not None:
+            self.save_tape(wav)
+        if self.sound is not None and speed and not typing:
+            # 1倍でないときは、テープの早送りと同じく音の高さも速さの倍率だけ変わる
+            sound = self.buzzer.render(m.sound_events, c0, m.cpu.cycles, self.turbo)
+            self.feed_sound(sound)
         elif self.sound is not None:
-            self.buzzer.mode = m.pc_out >> 4
+            self.buzzer.hold(m.pc_out >> 4)
+        if m.tape is not None and m.tape.done(m.cpu.cycles):
+            m.tape = None
+            self.say("テープが終わりました")
         mode = m.mode
         pressed = set(m.held) | ({"BRK"} if m.brk else set())
         surf = self.panel.draw(
@@ -896,9 +1029,8 @@ class App:
     def feed_sound(self, pcm: bytes) -> None:
         """1フレームぶんの音をためて、チャンネルが空いたときに渡す。
 
-        Channel.queue()は待っている音を1つしか持てず、続けて呼ぶと前のものを
-        上書きして捨ててしまう。フレームの時間が少しずれるだけで音が欠けるので、
-        待ちが空くまでこちらでためておく。
+        Channel.queue()は待ちを1つしか持てず、続けて呼ぶと前のものを捨てるので、
+        空くまでこちらでためておく。
         """
         sound = self.sound
         if sound is None:
@@ -931,7 +1063,7 @@ class App:
             if self.m.power:
                 self.m.power_off()
             os.makedirs(STATE_DIR, exist_ok=True)
-            self.m.save_ram(RAM_FILE)
+            self.m.save_ram(self.ram_file)
         pygame.quit()
 
     def run(self) -> None:
@@ -945,7 +1077,15 @@ class App:
         self.close()
 
 
-app_cli = typer.Typer(add_completion=False, help="SHARP PC-1251エミュレータ")
+app_cli = typer.Typer(add_completion=False, help="SHARP PC-1251/PC-1245エミュレータ")
+
+
+def _show_version(value: bool) -> None:
+    if value:
+        from importlib.metadata import version
+
+        typer.echo(f"pc1251-emu {version('pc1251-emu')}")
+        raise typer.Exit()
 
 
 @app_cli.command()
@@ -965,15 +1105,28 @@ def main(
     export: str | None = typer.Option(
         None, help="保存したRAMのBASICのプログラムを、このフォルダに.basで書き出して終わる"
     ),
+    model: str = typer.Option("1251", help="機種(1251か1245)。ROMはcpu-機種.romとbas-機種.rom"),
+    numpad: bool = typer.Option(
+        False, help="矢印キーを数字キーの8・2・4・6として押す(⌘K/Ctrl+Kで切り替え)"
+    ),
+    tape_: str | None = typer.Option(
+        None, "--tape", help="カセットの音(wav)をセットする。CLOAD・CLOAD Mで読み込める"
+    ),
+    version_: bool = typer.Option(
+        False, "--version", callback=_show_version, is_eager=True, help="版を出して終わる"
+    ),
 ) -> None:
+    if model not in MODELS:
+        typer.echo(f"機種は{'、'.join(MODELS)}のどれかです", err=True)
+        raise typer.Exit(2)
     if export is not None:
         try:
-            m = PC1251()
+            m = PC1251(model=model)
         except RomNotFound as e:
             typer.echo(str(e), err=True)
             raise typer.Exit(1) from e
-        if not m.load_ram(RAM_FILE):
-            typer.echo(f"{RAM_FILE}がありません", err=True)
+        if not m.load_ram(ram_file(model)):
+            typer.echo(f"{ram_file(model)}がありません", err=True)
             raise typer.Exit(1)
         path = export_program(m, export)
         typer.echo(path or "書き出すプログラムがありません")
@@ -987,6 +1140,9 @@ def main(
         persist=persist,
         program=program,
         run=run,
+        model=model,
+        numpad=numpad,
+        tape=tape_,
     )
     try:
         App(args).run()
