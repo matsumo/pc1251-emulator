@@ -142,7 +142,7 @@ The key positions are the same as on the PC-1251. Apart from DEG, which is visib
 | `pc1251emu/tape.py` | writing and reading cassette audio (wav) |
 | `doc/manual.pdf` | the user guide (in Japanese) |
 
-Instruction semantics follow MAME's SC61860 implementation, except for `56h` (READ), `LOOP` and `WAIT n`, which sources describe differently and where I followed how real programs use them, and `CUP`/`CDN` and the timer flags (`TEST 01`/`TEST 02`), which follow what the ROM's cassette routines need. The clock is 192 kHz.
+Instruction semantics follow MAME's SC61860 implementation, except for `56h` (READ), `LOOP` and `WAIT n`, which sources describe differently and where I followed how real programs use them, and `CUP`/`CDN` and the timer flags (`TEST 01`/`TEST 02`), which follow what the ROM's cassette routines need. For `CUP`/`CDN` and the timer flags I also checked against PockEmul and digihori's [PokecomGO](https://github.com/digihori/pokecom). The clock is 192 kHz.
 
 The memory map is: internal ROM at `0000-1FFF`, BASIC ROM at `4000-7FFF`, RAM at `B800-C7FF` (`C000-C7FF` on the PC-1245) and LCD RAM at `F800-F87F`.
 

@@ -144,7 +144,7 @@ uv run pc1251 --model 1245 primes --run
 | `pc1251emu/tape.py` | カセットの音(wav)の書き出しと読み込み |
 | `doc/manual.pdf` | 使い方の手引き |
 
-命令の意味はMAMEのSC61860の実装に従いました。ただし、資料によって扱いが違う`56h`(READ)、`LOOP`、`WAIT n`は実機のプログラムの書き方に、`CUP`・`CDN`とタイマの印(`TEST 01`・`TEST 02`)はROMのカセットの読み書きに合わせました。クロックは192kHzです。
+命令の意味はMAMEのSC61860の実装に従いました。ただし、資料によって扱いが違う`56h`(READ)、`LOOP`、`WAIT n`は実機のプログラムの書き方に、`CUP`・`CDN`とタイマの印(`TEST 01`・`TEST 02`)はROMのカセットの読み書きに合わせました。`CUP`・`CDN`とタイマの印の扱いは、PockEmulとdigihori氏の[PokecomGO](https://github.com/digihori/pokecom)の実装とも見比べて確かめました。クロックは192kHzです。
 
 メモリは内部ROMが`0000-1FFF`、BASIC ROMが`4000-7FFF`、RAMが`B800-C7FF`(PC-1245は`C000-C7FF`)、液晶RAMが`F800-F87F`です。機種ごとの違いは`machine.py`の`MODELS`の表にまとめ、絵は`pc1251emu/assets/`(PC-1245は`assets/pc1245/`)にあります。
 

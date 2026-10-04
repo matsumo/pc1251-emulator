@@ -11,6 +11,7 @@
 * WAIT n: 6+nサイクル(utz82の表、POPCOMの講座)。MAMEは9+2n。
 * CUP・CDN: 待つあいだPを1つずつ増やす(PC-1350の機械語マニュアル、utz82の表)。
   終わったあと、Xinが0ならZを立てる。MAMEは(P)を増やし、ZにXinをそのまま入れる。
+  PockEmulとPokecomGO(digihori/pokecom)の実装とも見比べた。
 
 それ以外のサイクル数はMAMEの値を使う。
 """
