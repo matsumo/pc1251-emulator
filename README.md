@@ -146,7 +146,7 @@ uv run pc1251 --model 1245 primes --run
 
 命令の意味はMAMEのSC61860の実装に従いました。ただし、資料によって扱いが違う`56h`(READ)、`LOOP`、`WAIT n`は実機のプログラムの書き方に、`CUP`・`CDN`とタイマの印(`TEST 01`・`TEST 02`)はROMのカセットの読み書きに合わせました。`CUP`・`CDN`とタイマの印の扱いは、PockEmulとdigihori氏の[PokecomGO](https://github.com/digihori/pokecom)の実装とも見比べて確かめました。クロックは192kHzです。
 
-メモリは内部ROMが`0000-1FFF`、BASIC ROMが`4000-7FFF`、RAMが`B800-C7FF`(PC-1245は`C000-C7FF`)、液晶RAMが`F800-F87F`です。機種ごとの違いは`machine.py`の`MODELS`の表にまとめ、絵は`pc1251emu/assets/`(PC-1245は`assets/pc1245/`)にあります。
+メモリは内部ROMが`0000-1FFF`、BASIC ROMが`4000-7FFF`、RAMが`B800-C7FF`(PC-1245は`C000-C7FF`)、液晶RAMが`F800-F87F`です。液晶RAMの`F800-F8FF`は`F900-FFFF`の256バイトごとにも見え、PC-1245では`E800-EFFF`にも見えます。機種ごとの違いは`machine.py`の`MODELS`の表にまとめ、絵は`pc1251emu/assets/`(PC-1245は`assets/pc1245/`)にあります。
 
 モードスイッチは、ポートIBのビット3を出してINBで読みます。ビット0がRSV、ビット1がPRO、ビット2がOFFで、どれも立っていなければRUNです。OFFを読むとROMは内部RAMの`30h-37h`に印を書いてから自分で電源を切り、次の起動で印がないとプログラムを消します。
 
@@ -168,6 +168,10 @@ uv run pytest -q tests
 ```
 
 ROMがなければ、ROMを使う試験は飛ばします。PC-1245の試験(`tests/test_pc1245.py`)にはPC-1245のROMが要ります。
+
+## 謝辞
+
+PC-1245の液晶RAMが`E800-EFFF`にも見えることは、[PokecomGO](https://github.com/digihori/pokecom)の作者の[Yoshimine Horiuchi](https://x.com/yo6987)氏に教えていただきました。お礼申し上げます。
 
 ## 権利について
 

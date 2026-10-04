@@ -1017,3 +1017,18 @@ def test_version():
     want = found.group(1)
     result = CliRunner().invoke(app_cli, ["--version"])
     assert result.exit_code == 0 and result.output.strip() == f"pc1251-emu {want}"
+
+
+def test_lcd_ram_mirrors():
+    """液晶RAM(F800-F8FF)は、F900-FFFFの各256バイトにも見える。PC-1245ではE800-EFFFにも"""
+    from pc1251emu.machine import PC1251
+
+    for model in ("1251", "1245"):
+        m = PC1251(cpu_rom=bytes(0x2000), bas_rom=bytes(0x4000), model=model)
+        for page in (0xF900, 0xFF00, 0xE800, 0xEF00):
+            m.write(page + 0x23, 0x5A)
+            mirrored = page >= 0xF900 or model == "1245"
+            assert (m.read(0xF823) == 0x5A) == mirrored, (model, hex(page))
+            assert (m.read(page + 0x23) == 0x5A) == mirrored, (model, hex(page))
+            m.write(0xF823, 0)
+        assert m.read(0xE7FF) == 0 and m.read(0xF000) == 0

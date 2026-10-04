@@ -7,7 +7,8 @@
     4000-7FFF  BASIC ROM(16KB)
     B800-C7FF  RAM(4KB)。B000-B7FFはB800-BFFFの鏡(PockEmulによる)。
                BASICはプログラムの先頭をB030(=B830)に置く
-    F800-F87F  液晶RAM
+    F800-F87F  液晶RAM。F800-F8FFの256バイトが、F900-FFFFの各256バイトにも見える。
+               PC-1245ではE800-EFFFの各256バイトにも見える(LCD_MIRRORS)
 
 PC-1245も同じつくりで、違いはMODELSの表にまとめた。RAMはC000-C7FFの2KB、
 液晶は16桁で、モードスイッチにRSVの段がない。ROMはPC-1251とは別のもの。
@@ -112,6 +113,7 @@ class Model:
     title: str  # "PC-1251"
     ram: tuple[int, int]  # RAMの範囲(終わりは含まない)
     mirror: tuple[int, int] | None  # RAMの鏡の範囲。+0x800した番地と同じもの
+    lcd_mirrors: tuple[int, ...]  # 液晶RAM(F800-F8FF)と同じものが見える256バイトの区画の頭
     cells: int  # 液晶の桁数
     modes: tuple[str, ...]  # モードスイッチの段(上から)
     symbols: dict[str, tuple[int, int]]
@@ -129,6 +131,7 @@ MODELS = {
         title="PC-1251",
         ram=(0xB800, 0xC800),
         mirror=(0xB000, 0xB800),
+        lcd_mirrors=tuple(range(0xF900, 0x10000, 0x100)),
         cells=24,
         modes=("RSV", "PRO", "RUN", "OFF"),
         symbols=SYMBOLS,
@@ -139,6 +142,8 @@ MODELS = {
         title="PC-1245",
         ram=(0xC000, 0xC800),
         mirror=None,
+        # E800-EFFFは、実機で動くPC-1245のプログラムがそこに書いて液晶に出していることから
+        lcd_mirrors=tuple(range(0xE800, 0xF000, 0x100)) + tuple(range(0xF900, 0x10000, 0x100)),
         cells=16,
         modes=("PRO", "RUN", "OFF"),
         symbols=SYMBOLS_1245,
@@ -211,6 +216,9 @@ class PC1251(Bus):
         self._mirror_lo, self._mirror_hi = mirror if mirror else (0, 0)
         for a in range(LCD_LO, LCD_HI):
             self.wmask[a] = 1
+        self._lcd_page = bytearray(256)  # 番地の上位バイトごとに、液晶RAMの鏡なら1
+        for a in self.model.lcd_mirrors:
+            self._lcd_page[a >> 8] = 1
         self.cpu = SC61860(self)
         self.held: set[str] = set()  # 押されているキー
         self.brk = False  # BRK(ON)キー
@@ -243,11 +251,15 @@ class PC1251(Bus):
     def read(self, a: int) -> int:
         if self._mirror_lo <= a < self._mirror_hi:
             a += 0x800
+        elif self._lcd_page[a >> 8]:
+            a = LCD_LO | (a & 0xFF)
         return self.mem[a]
 
     def write(self, a: int, v: int) -> None:
         if self._mirror_lo <= a < self._mirror_hi:
             a += 0x800
+        elif self._lcd_page[a >> 8]:
+            a = LCD_LO | (a & 0xFF)
         if self.wmask[a]:
             self.mem[a] = v
             if a >= LCD_LO:

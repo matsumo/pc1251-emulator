@@ -144,7 +144,7 @@ The key positions are the same as on the PC-1251. Apart from DEG, which is visib
 
 Instruction semantics follow MAME's SC61860 implementation, except for `56h` (READ), `LOOP` and `WAIT n`, which sources describe differently and where I followed how real programs use them, and `CUP`/`CDN` and the timer flags (`TEST 01`/`TEST 02`), which follow what the ROM's cassette routines need. For `CUP`/`CDN` and the timer flags I also checked against PockEmul and digihori's [PokecomGO](https://github.com/digihori/pokecom). The clock is 192 kHz.
 
-The memory map is: internal ROM at `0000-1FFF`, BASIC ROM at `4000-7FFF`, RAM at `B800-C7FF` (`C000-C7FF` on the PC-1245) and LCD RAM at `F800-F87F`.
+The memory map is: internal ROM at `0000-1FFF`, BASIC ROM at `4000-7FFF`, RAM at `B800-C7FF` (`C000-C7FF` on the PC-1245) and LCD RAM at `F800-F87F`. The LCD RAM `F800-F8FF` also appears in every 256-byte block of `F900-FFFF`, and on the PC-1245 in `E800-EFFF` as well.
 
 The mode switch is read with INB after setting bit 3 of port IB. Bit 0 means RSV, bit 1 PRO and bit 2 OFF; with none of them set the switch is at RUN. On OFF the ROM writes a marker into internal RAM `30h-37h` and powers itself off; if the marker is missing at the next power-on, it clears the program.
 
@@ -166,6 +166,10 @@ uv run pytest -q tests
 ```
 
 Tests that need the ROM are skipped when it isn't there. The PC-1245 tests (`tests/test_pc1245.py`) need `rom/cpu-1245.rom` and `rom/bas-1245.rom`.
+
+## Acknowledgements
+
+Thanks to [Yoshimine Horiuchi](https://x.com/yo6987), the author of [PokecomGO](https://github.com/digihori/pokecom), who pointed out that the PC-1245's LCD RAM also appears at `E800-EFFF`.
 
 ## Rights
 
