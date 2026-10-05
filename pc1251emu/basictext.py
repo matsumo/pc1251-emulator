@@ -1,7 +1,7 @@
 """RAMにあるBASICのプログラムを文字に戻す(ファイルへの書き出し用)
 
-PC-1251はプログラムを中間コードでRAMに置く。1行は次の形で、B830番地の
-FFのあとに並び、最後にまたFFが来る。
+PC-1251はプログラムを中間コードでRAMに置く。1行は次の形で、B830番地
+(PC-1245はC000番地)のFFのあとに並び、最後にまたFFが来る。
 
     E0+百の位  十と一の位(BCD)  中身…  00
 
@@ -121,7 +121,8 @@ def line_text(body: bytes, keywords: dict[int, str]) -> str:
     return "".join(out).rstrip()
 
 
-def program_text(mem, keywords: dict[int, str] | None = None) -> str:
-    """RAMのプログラムをBASICの文字にする(1行ずつ改行で区切る)"""
+def program_text(mem, keywords: dict[int, str] | None = None, start: int = PROG_START) -> str:
+    """RAMのプログラムをBASICの文字にする(1行ずつ改行で区切る)。startはプログラムの
+    先頭(PC-1245はC000。machine.Model.prog_start)"""
     kw = keywords if keywords is not None else keyword_table(mem)
-    return "".join(f"{n} {line_text(body, kw)}\n" for n, body in program_lines(mem))
+    return "".join(f"{n} {line_text(body, kw)}\n" for n, body in program_lines(mem, start))

@@ -1,14 +1,17 @@
 """SHARP SC61860(ESR-H)の命令を1つずつ実行するCPUコア
 
 命令の意味はMAMEの実装(src/devices/cpu/sc61860)を下敷きにし、
-資料で扱いが分かれる次の3点は、実機のプログラムの書き方から決めた
-(『PC-インタープリタを読む』1.4節)。
+次の点は、MAMEと違う扱いにした。READ、LOOP、WAITは実機のプログラムの書き方から
+決めた(『PC-インタープリタを読む』1.4節)。CUP・CDNはROMのカセットの読み書きに合わせた。
 
 * 56h(READ): 1バイト命令。次の番地の1バイトをAに読み、そのバイトは
   命令として残す。MAMEは2バイト命令として(P)に即値を入れる。
 * LOOP: (R)を1減らし、桁借りがなければ後ろへ飛ぶ。抜けるときに
   スタックの一番上(回数)を1つ捨てる。MAMEは飛ぶたびに捨てる。
 * WAIT n: 6+nサイクル(utz82の表、POPCOMの講座)。MAMEは9+2n。
+* CUP・CDN: 待つあいだPを1つずつ増やす(PC-1350の機械語マニュアル、utz82の表)。
+  終わったあと、Xinが0ならZを立てる。MAMEは(P)を増やし、ZにXinをそのまま入れる。
+  PockEmulとPokecomGO(digihori/pokecom)の実装とも見比べた。
 
 それ以外のサイクル数はMAMEの値を使う。
 """
@@ -48,6 +51,14 @@ class Bus:
 
     def test_bits(self) -> int:
         """TEST命令で見える信号。bit0 512ms, bit1 2ms, bit3 BRK, bit6 RESET, bit7 Xin"""
+        return 0
+
+    def test(self, n: int) -> int:
+        """TEST nで見えるビット。読んだときに消える信号があれば、ここで消す"""
+        return self.test_bits() & n
+
+    def xin(self, cycle: int) -> int:
+        """サイクルcycleでのカセット入力(0か1)"""
         return 0
 
 
@@ -689,16 +700,17 @@ class SC61860:
             level = 1 if op == 0x6F else 0
 
             def f():
+                # 待つあいだPを1つずつ進める。ROMはあとでLDPで待った長さを読む
                 n = ram[I]
                 cyc = 1
-                x = (bus.test_bits() >> 7) & 1
+                x = bus.xin(s.cycles + cyc)
                 for _ in range(n + 1):
-                    ram[s.p] = (ram[s.p] + 1) & 0x7F
+                    s.p = (s.p + 1) & 0x7F
                     cyc += 4
-                    x = (bus.test_bits() >> 7) & 1
+                    x = bus.xin(s.cycles + cyc)  # 1回ごとに4サイクル進んだ時刻で見る
                     if x != level:
                         break
-                s.z = x
+                s.z = int(x == 0)  # ZはXinが0のとき。待ちきれずに終わったかをROMがJPZで見る
                 return cyc
 
             return f
@@ -839,7 +851,7 @@ class SC61860:
 
             def f():
                 n = s._fetch()
-                s.z = int((bus.test_bits() & n) == 0)
+                s.z = int(bus.test(n) == 0)
                 return 4
 
             return f

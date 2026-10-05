@@ -24,13 +24,13 @@ def lcd_text(machine, unknown: str = "?") -> str:
     if t is None:
         t = machine._glyphs = _table(machine.mem)
     cols = machine.columns()
-    return "".join(t.get(bytes(cols[i : i + 5]), unknown) for i in range(0, 120, 5))
+    return "".join(t.get(bytes(cols[i : i + 5]), unknown) for i in range(0, len(cols), 5))
 
 
 def learn(machine, text: str) -> None:
     """表示中の文字列から、記号のパターンを覚える(テスト用)"""
     t = getattr(machine, "_glyphs", None) or _table(machine.mem)
     cols = machine.columns()
-    for i, ch in enumerate(text[:24]):
+    for i, ch in enumerate(text[: len(cols) // 5]):
         t.setdefault(bytes(cols[5 * i : 5 * i + 5]), ch)
     machine._glyphs = t

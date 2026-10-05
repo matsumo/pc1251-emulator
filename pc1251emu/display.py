@@ -1,7 +1,6 @@
 """筐体と液晶の描画
 
-筐体の絵と寸法は、以前に作った画面シミュレータで実機の写真から実測したものを
-持ってきた。このモジュールは絵を読み込むだけで、あちらのコードは使わない。
+筐体の絵はassets/の画像(寸法と色は実機の写真から測った)。ここでは読み込むだけ。
 
 液晶は次の点を実機に似せた。
 
@@ -9,8 +8,13 @@
 * 消灯しているドットも薄く見える。マルチプレックス駆動では消灯側のドットにも
   小さな電圧がかかるため。電源を切ると駆動が止まり、この薄い格子も消える。
 * 反射型の液晶なので、ドットの影が奥の反射板に落ち、右下へずれて見える。
+* 表示記号(RUN、DEGなど)も液晶の一部なので、ドットと同じ色で、影も尾引きも同じ。
+  消えている記号も、ドットの格子より薄く見える。
 * 応答が遅い(点灯より消灯が遅い)ので、動くものは尾を引く。
 * Cポートのビット0で表示を切ると、液晶全体が消える(BASICの実行中など)。
+
+絵は機種ごとのフォルダにある。PC-1251はassets/、PC-1245はassets/pc1245/。
+液晶の桁数とドットの大きさ、スイッチの位置はそのフォルダのlayout.jsonに書いてある。
 """
 
 import json
@@ -25,6 +29,7 @@ ASSETS = os.path.join(HERE, "assets")
 
 with open(os.path.join(ASSETS, "keys.json")) as _f:
     _KEYS = json.load(_f)
+# 筐体の大きさとキーの位置は、PC-1251とPC-1245で同じ
 IMG_W = 1425
 BODY_H = _KEYS["top"]  # 液晶部の高さ。その下がキーボード
 IMG_H = _KEYS["height"]
@@ -38,8 +43,19 @@ DOT, PITCH = 5, 7
 PHYS_W = CELLS * (CW + 1) - 1
 MAT_W = PHYS_W * PITCH - 1
 MAT_H = H * PITCH - 1
-MAT_X, MAT_Y = 156, 149  # tools/body_art.pyと同じ値
-ANN_Y, ANN_H = 119, 18
+MAT_X, MAT_Y = 152, 160  # 本体の絵(body.png)での液晶の1桁目の左上
+ANN_Y, ANN_H = 125, 18
+
+
+def asset_dir(model: str = "1251") -> str:
+    return ASSETS if model == "1251" else os.path.join(ASSETS, f"pc{model}")
+
+
+def layout(model: str = "1251") -> dict:
+    """液晶とスイッチの配置(assets/…/layout.json)"""
+    with open(os.path.join(asset_dir(model), "layout.json")) as f:
+        return json.load(f)
+
 
 DOT_INK = (28, 36, 64)
 SHADOW_INK = (40, 48, 44)
@@ -47,6 +63,7 @@ OFF_ALPHA = 30  # 消灯ドットの見え方
 ON_ALPHA = 238
 SHADOW_ALPHA = 60  # 反射板に落ちる影の濃さ(点灯時)
 SHADOW_DX, SHADOW_DY = 2, 2  # 影のずれ(px)
+ANN_SHADOW_PAD = 4  # 表示記号の影が、記号の段の下へはみ出す幅
 LEVELS = 8
 TAU_RISE_MS = 33.0
 TAU_FALL_MS = 86.0
@@ -64,25 +81,39 @@ def _surface(img: Image.Image) -> pygame.Surface:
 
 
 class Panel:
-    def __init__(self):
-        self.body = Image.open(os.path.join(ASSETS, "body_top.png")).convert("RGB")
-        with open(os.path.join(ASSETS, "switch_box.txt")) as f:
-            self.sw_xy = tuple(int(v) for v in f.read().split())
+    def __init__(self, model: str = "1251"):
+        d = asset_dir(model)
+        lay = layout(model)
+        self.cells = lay["cells"]
+        self.w = self.cells * CW  # 液晶の列の数
+        self.mat_x, self.mat_y = lay["mat"]
+        self.dot_w, self.dot_h = lay["dot"]
+        self.pitch_x, self.pitch_y = lay["pitch"]
+        self.ann_y, self.ann_h = lay["ann"]
+        # 右端と下端のドットの外に1pxの余白を含む(PC-1251で1000x48)
+        self.mat_w = (self.cells * (CW + 1) - 1) * self.pitch_x - self.pitch_x + self.dot_w + 1
+        self.mat_h = H * self.pitch_y - self.pitch_y + self.dot_h + 1
+        with open(os.path.join(d, "keys.json")) as f:
+            self.key_rects = {k: tuple(v) for k, v in json.load(f)["keys"].items()}
+        self.body = Image.open(os.path.join(d, "body_top.png")).convert("RGB")
+        self.sw_xy = tuple(lay["switch_xy"])
+        self.switch_area = tuple(lay["switch_area"])  # クリックでスイッチを動かせる範囲
+        self.switch_stops = [(m, y) for m, y in lay["switch_stops"]]  # 段の中心のy
         self.switch = {
-            m: _surface(Image.open(os.path.join(ASSETS, f"switch_{m}.png")))
-            for m in ("RUN", "PRO", "RSV", "OFF")
+            m: _surface(Image.open(os.path.join(d, f"switch_{m}.png")))
+            for m, _y in self.switch_stops
         }
         self.out = pygame.Surface((OUT_W, OUT_H))
         self.out.blit(_surface(self._desk()), (0, 0))
         self.rim = _surface(self._rim())
         self.canvas = pygame.Surface((IMG_W, IMG_H))
         self.canvas.blit(_surface(self.body), (0, 0))
-        kb_up = Image.open(os.path.join(ASSETS, "keyboard_up.png")).convert("RGB")
-        kb_down = Image.open(os.path.join(ASSETS, "keyboard_down.png")).convert("RGB")
+        kb_up = Image.open(os.path.join(d, "keyboard_up.png")).convert("RGB")
+        kb_down = Image.open(os.path.join(d, "keyboard_down.png")).convert("RGB")
         self.canvas.blit(_surface(kb_up), (0, BODY_H))
         self.key_up = {}
         self.key_down = {}
-        for name, (x0, y0, x1, y1) in KEY_RECTS.items():
+        for name, (x0, y0, x1, y1) in self.key_rects.items():
             box = (x0, y0 - BODY_H, x1, y1 - BODY_H)
             self.key_up[name] = _surface(kb_up.crop(box))
             self.key_down[name] = _surface(kb_down.crop(box))
@@ -90,22 +121,31 @@ class Panel:
         self.glass = _surface(self._glass())
         self.grid = self._grid()
         self.grid_level = 0.0
-        self.ann_bg = _surface(self.body.crop((MAT_X, ANN_Y, MAT_X + MAT_W, ANN_Y + ANN_H)))
+        mx, ay = self.mat_x, self.ann_y
+        # 記号の影は下へはみ出すので、その分も含めて毎フレーム下地を貼り直す
+        self.ann_bg = _surface(
+            self.body.crop((mx, ay, mx + self.mat_w, ay + self.ann_h + ANN_SHADOW_PAD))
+        )
         self.dots = [self._dot(k) for k in range(LEVELS)]
         self.shadows = [self._shadow(k) for k in range(LEVELS)]
         self.symbols = {}
-        with open(os.path.join(ASSETS, "symbols.txt")) as f:
+        with open(os.path.join(d, "symbols.txt")) as f:
             for line in f:
                 name, x = line.split()
-                mask = Image.open(os.path.join(ASSETS, f"sym_{name}.png")).convert("L")
+                mask = Image.open(os.path.join(d, f"sym_{name}.png")).convert("L")
                 imgs = []
                 for k in range(LEVELS):
                     a = int(ON_ALPHA * k / (LEVELS - 1))
                     im = Image.new("RGBA", mask.size, DOT_INK + (0,))
                     im.putalpha(mask.point(lambda v, a=a: v * a // 255))
                     imgs.append(_surface(im))
-                self.symbols[name] = (int(x), imgs)
-        self.level = [[0.0] * W for _ in range(H)]
+                ghost = Image.new("RGBA", mask.size, DOT_INK + (0,))
+                ghost.putalpha(
+                    mask.point(lambda v: v * OFF_ALPHA // 2 // 255)
+                )  # ドットの格子より薄く
+                shadows = [self._sym_shadow(mask, k) for k in range(LEVELS)]
+                self.symbols[name] = (int(x), imgs, shadows, _surface(ghost))
+        self.level = [[0.0] * self.w for _ in range(H)]
         self.sym_level = {n: 0.0 for n in self.symbols}
         self.set_fps(30)
 
@@ -166,41 +206,56 @@ class Panel:
         return Image.alpha_composite(out, edge)
 
     def _glass(self) -> Image.Image:
-        box = (MAT_X - 4, MAT_Y - 4, MAT_X + MAT_W + 4, MAT_Y + MAT_H + 4)
+        mx, my = self.mat_x, self.mat_y
+        box = (mx - 4, my - 4, mx + self.mat_w + 4, my + self.mat_h + 4)
         return self.body.crop(box).convert("RGB")
 
     def _grid(self) -> pygame.Surface:
         """消灯ドットの薄い格子。電源が入っているあいだだけ重ねる"""
-        ov = Image.new("RGBA", (MAT_W + 8, MAT_H + 8), (0, 0, 0, 0))
+        ov = Image.new("RGBA", (self.mat_w + 8, self.mat_h + 8), (0, 0, 0, 0))
         d = ImageDraw.Draw(ov)
+        dw, dh = self.dot_w, self.dot_h
         for y in range(H):
-            for x in range(W):
-                px = 4 + phys_x(x) * PITCH
-                py = 4 + y * PITCH
-                d.rectangle([px, py, px + DOT - 1, py + DOT - 1], fill=DOT_INK + (OFF_ALPHA,))
+            for x in range(self.w):
+                px = 4 + phys_x(x) * self.pitch_x
+                py = 4 + y * self.pitch_y
+                d.rectangle([px, py, px + dw - 1, py + dh - 1], fill=DOT_INK + (OFF_ALPHA,))
         return _surface(ov)
 
     def _dot(self, k: int) -> pygame.Surface:
         a = int(OFF_ALPHA + (ON_ALPHA - OFF_ALPHA) * k / (LEVELS - 1))
-        im = Image.new("RGBA", (DOT, DOT), DOT_INK + (a,))
+        dw, dh = self.dot_w, self.dot_h
+        im = Image.new("RGBA", (dw, dh), DOT_INK + (a,))
         # 角はわずかに丸い
-        for x, y in ((0, 0), (DOT - 1, 0), (0, DOT - 1), (DOT - 1, DOT - 1)):
+        for x, y in ((0, 0), (dw - 1, 0), (0, dh - 1), (dw - 1, dh - 1)):
             im.putpixel((x, y), DOT_INK + (int(a * 0.55),))
         return _surface(im)
 
     def _shadow(self, k: int) -> pygame.Surface:
         a = int(SHADOW_ALPHA * k / (LEVELS - 1))
-        size = DOT + 6
-        m = Image.new("L", (size, size), 0)
-        ImageDraw.Draw(m).rectangle([3, 3, 3 + DOT - 1, 3 + DOT - 1], fill=255)
+        dw, dh = self.dot_w, self.dot_h
+        m = Image.new("L", (dw + 6, dh + 6), 0)
+        ImageDraw.Draw(m).rectangle([3, 3, 3 + dw - 1, 3 + dh - 1], fill=255)
         m = m.filter(ImageFilter.GaussianBlur(1.1)).point(lambda v: v * a // 255)
-        im = Image.new("RGBA", (size, size), SHADOW_INK + (0,))
+        im = Image.new("RGBA", m.size, SHADOW_INK + (0,))
+        im.putalpha(m)
+        return _surface(im)
+
+    def _sym_shadow(self, mask: Image.Image, k: int) -> pygame.Surface:
+        """表示記号が反射板に落とす影(ドットの影と同じ濃さ、ぼけ、ずれ)。
+        左上に3pxの余白をつけた絵で、下は貼り直す下地の範囲で切る"""
+        a = int(SHADOW_ALPHA * k / (LEVELS - 1))
+        m = Image.new("L", (mask.width + 6, mask.height + 6), 0)
+        m.paste(mask, (3, 3))
+        m = m.filter(ImageFilter.GaussianBlur(1.1)).point(lambda v: v * a // 255)
+        m = m.crop((0, 0, m.width, 3 - SHADOW_DY + self.ann_h + ANN_SHADOW_PAD))
+        im = Image.new("RGBA", m.size, SHADOW_INK + (0,))
         im.putalpha(m)
         return _surface(im)
 
     # ---- 1フレーム ----
     def key_at(self, x: float, y: float) -> str | None:
-        for name, (x0, y0, x1, y1) in KEY_RECTS.items():
+        for name, (x0, y0, x1, y1) in self.key_rects.items():
             if x0 <= x < x1 and y0 <= y < y1:
                 return name
         return None
@@ -216,29 +271,31 @@ class Panel:
     ) -> pygame.Surface:
         dst = self.canvas
         dst.blit(self.switch[mode], self.sw_xy)
-        pressed = {k for k in pressed if k in KEY_RECTS}
+        rects = self.key_rects
+        pressed = {k for k in pressed if k in rects}
         if pressed != self.shown_down:  # 押されているキーだけ沈んだ絵にする
             for k in self.shown_down - pressed:
-                dst.blit(self.key_up[k], KEY_RECTS[k][:2])
+                dst.blit(self.key_up[k], rects[k][:2])
             for k in pressed - self.shown_down:
-                dst.blit(self.key_down[k], KEY_RECTS[k][:2])
+                dst.blit(self.key_down[k], rects[k][:2])
             self.shown_down = pressed
-        dst.blit(self.glass, (MAT_X - 4, MAT_Y - 4))
+        mx, my, px_, py_ = self.mat_x, self.mat_y, self.pitch_x, self.pitch_y
+        dst.blit(self.glass, (mx - 4, my - 4))
         rise, fall = self.rise, self.fall
         g = self.grid_level
         g = g + (1.0 - g) * rise if powered else g - g * fall
         self.grid_level = g = 0.0 if g < 0.01 else g
         if g:
             self.grid.set_alpha(int(255 * g + 0.5))
-            dst.blit(self.grid, (MAT_X - 4, MAT_Y - 4))
+            dst.blit(self.grid, (mx - 4, my - 4))
         top = LEVELS - 1
         level = self.level
         todo = []
         for y in range(H):
             lrow = level[y]
             bit = 1 << y
-            py = MAT_Y + y * PITCH
-            for x in range(W):
+            py = my + y * py_
+            for x in range(self.w):
                 v = lrow[x]
                 if on and columns[x] & bit:
                     v += (1.0 - v) * rise
@@ -249,7 +306,7 @@ class Panel:
                 lrow[x] = v
                 k = int(v * top + 0.5)
                 if k:
-                    todo.append((MAT_X + phys_x(x) * PITCH, py, k))
+                    todo.append((mx + phys_x(x) * px_, py, k))
         sh = self.shadows
         for px, py, k in todo:  # 影を先に、ドットを後に重ねる
             dst.blit(sh[k], (px - 3 + SHADOW_DX, py - 3 + SHADOW_DY))
@@ -257,17 +314,26 @@ class Panel:
         for px, py, k in todo:
             dst.blit(dots[k], (px, py))
 
-        dst.blit(self.ann_bg, (MAT_X, ANN_Y))
-        for name, (x, imgs) in self.symbols.items():
+        ay = self.ann_y
+        dst.blit(self.ann_bg, (mx, ay))
+        lit = []
+        for name, (x, imgs, shadows, ghost) in self.symbols.items():
             v = self.sym_level[name]
             if on and name in symbols:
                 v += (1.0 - v) * rise
             else:
                 v -= v * fall
             self.sym_level[name] = v
+            if g:  # 消えている記号も、ドットの格子と同じく薄く見える
+                ghost.set_alpha(int(255 * g + 0.5))
+                dst.blit(ghost, (mx + x, ay))
             k = int(v * top + 0.5)
             if k:
-                dst.blit(imgs[k], (MAT_X + x, ANN_Y))
+                lit.append((x, imgs[k], shadows[k]))
+        for x, _img, shadow in lit:  # ドットと同じく、影を先に重ねる
+            dst.blit(shadow, (mx + x - 3 + SHADOW_DX, ay - 3 + SHADOW_DY))
+        for x, img, _shadow in lit:
+            dst.blit(img, (mx + x, ay))
         self.out.blit(dst, (MARGIN, MARGIN))
         self.out.blit(self.rim, (MARGIN, MARGIN))
         return self.out
